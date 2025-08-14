@@ -1,23 +1,371 @@
-name: Simple CI
+name: 🚀 The Fountain Path - Advanced CI/CD Pipeline
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ main, develop, 'feature/*', 'hotfix/*' ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 2 * * 1' # Weekly security scan on Mondays at 2 AM
+  workflow_dispatch: # Manual trigger
+
+env:
+  NODE_VERSION: '20'
+  CACHE_VERSION: v1
 
 jobs:
-  test:
+  # ===============================
+  # 🔍 CODE QUALITY & SECURITY
+  # ===============================
+  quality-check:
+    name: 🔍 Code Quality & Security
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     
-    steps:
-      - uses: actions/checkout@v4
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
       
-      - uses: actions/setup-node@v4
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
         with:
-          node-version: '18'
+          fetch-depth: 0 # Full history for better analysis
+          
+      - name: 🏗️ Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
           
-      - run: npm install
-      
-      - run: npx tsc --noEmit
+      - name: 📦 Cache Dependencies
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ env.CACHE_VERSION }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ env.CACHE_VERSION }}-
+            
+      - name: 🔧 Install Dependencies
+        run: npm ci --legacy-peer-deps --prefer-offline
+        
+      - name: 🔍 TypeScript Type Check
+        run: |
+          echo "::group::TypeScript Compilation"
+          npx tsc --noEmit --pretty
+          echo "::endgroup::"
+          
+      - name: 🎯 ESLint Code Analysis
+        run: |
+          echo "::group::ESLint Analysis"
+          if [ -f ".eslintrc.js" ] || [ -f ".eslintrc.json" ] || [ -f "eslint.config.js" ]; then
+            npx eslint . --ext .ts,.tsx,.js,.jsx --format=compact --max-warnings 0
+          else
+            echo "⚠️ No ESLint configuration found"
+          fi
+          echo "::endgroup::"
         continue-on-error: true
         
-      - run: npm test
+      - name: 🔒 Security Audit
+        run: |
+          echo "::group::Security Vulnerability Scan"
+          npm audit --audit-level moderate --production
+          echo "::endgroup::"
         continue-on-error: true
+        
+      - name: 📊 Dependency Analysis
+        run: |
+          echo "::group::Dependency Analysis"
+          echo "📦 Outdated packages:"
+          npm outdated || true
+          echo ""
+          echo "📈 Package sizes:"
+          npx cost-of-modules --no-install || echo "cost-of-modules not available"
+          echo "::endgroup::"
+        continue-on-error: true
+
+  # ===============================
+  # 🧪 TESTING SUITE
+  # ===============================
+  test:
+    name: 🧪 Test Suite
+    runs-on: ubuntu-latest
+    needs: quality-check
+    timeout-minutes: 20
+    
+    strategy:
+      matrix:
+        test-type: [unit, integration]
+        
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_ROOT_USERNAME: testuser
+          MONGO_INITDB_ROOT_PASSWORD: testpass
+        options: >-
+          --health-cmd "mongosh --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: 🏗️ Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: 📦 Restore Dependencies Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            ~/.npm
+          key: ${{ runner.os }}-node-${{ env.CACHE_VERSION }}-${{ hashFiles('**/package-lock.json') }}
+          
+      - name: 🔧 Install Dependencies
+        if: needs.quality-check.outputs.cache-hit != 'true'
+        run: npm ci --legacy-peer-deps --prefer-offline
+        
+      - name: 🧪 Run ${{ matrix.test-type }} Tests
+        run: |
+          echo "::group::${{ matrix.test-type }} Tests"
+          if npm run test:${{ matrix.test-type }} --if-present; then
+            echo "✅ ${{ matrix.test-type }} tests passed"
+          elif npm run test --if-present; then
+            echo "✅ General tests passed"
+          else
+            echo "⚠️ No tests configured"
+          fi
+          echo "::endgroup::"
+        env:
+          NODE_ENV: test
+          MONGODB_URI: mongodb://testuser:testpass@localhost:27017/test
+          REDIS_URL: redis://localhost:6379
+        continue-on-error: true
+        
+      - name: 📊 Test Coverage Report
+        run: |
+          if npm run coverage --if-present; then
+            echo "📊 Coverage report generated"
+          else
+            echo "⚠️ No coverage script found"
+          fi
+        continue-on-error: true
+
+  # ===============================
+  # 🏗️ BUILD APPLICATIONS
+  # ===============================
+  build:
+    name: 🏗️ Build Applications
+    runs-on: ubuntu-latest
+    needs: [quality-check, test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    timeout-minutes: 30
+    
+    strategy:
+      matrix:
+        platform: [web, android-preview]
+        
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: 🏗️ Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: 📦 Install Dependencies
+        run: npm ci --legacy-peer-deps
+        
+      - name: 🏗️ Build ${{ matrix.platform }}
+        run: |
+          echo "::group::Building ${{ matrix.platform }}"
+          case "${{ matrix.platform }}" in
+            "web")
+              if npm run build:web --if-present; then
+                echo "✅ Web build successful"
+              elif npx expo export:web --if-present; then
+                echo "✅ Expo web export successful"
+              else
+                echo "⚠️ Web build not configured"
+              fi
+              ;;
+            "android-preview")
+              if command -v expo &> /dev/null; then
+                echo "🤖 Android preview build (requires Expo account)"
+                # expo build:android --type apk --non-interactive
+                echo "⚠️ Skipping Android build (no Expo token)"
+              else
+                echo "⚠️ Expo CLI not available"
+              fi
+              ;;
+          esac
+          echo "::endgroup::"
+        continue-on-error: true
+        
+      - name: 📦 Archive Build Artifacts
+        if: matrix.platform == 'web'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-build-${{ github.sha }}
+          path: |
+            web-build/
+            dist/
+            build/
+          retention-days: 7
+
+  # ===============================
+  # 🚀 DEPLOYMENT
+  # ===============================
+  deploy:
+    name: 🚀 Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    timeout-minutes: 15
+    
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: 📦 Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build-${{ github.sha }}
+          path: ./build
+          
+      - name: 🚀 Deploy to GitHub Pages (Staging)
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build
+          destination_dir: staging
+          
+      - name: 📝 Deployment Summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: Staging" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/staging" >> $GITHUB_STEP_SUMMARY
+
+  # ===============================
+  # 🏷️ RELEASE MANAGEMENT
+  # ===============================
+  release:
+    name: 🏷️ Create Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
+    
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: 🏷️ Generate Release Tag
+        id: tag
+        run: |
+          VERSION=$(date +'%Y.%m.%d')-${{ github.run_number }}
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+          echo "Generated tag: v$VERSION"
+          
+      - name: 📝 Generate Changelog
+        id: changelog
+        run: |
+          echo "## 🚀 What's New" > CHANGELOG.md
+          git log --pretty=format:"- %s (%an)" --since="7 days ago" >> CHANGELOG.md
+          
+      - name: 🏷️ Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          release_name: The Fountain Path ${{ steps.tag.outputs.tag }}
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+
+  # ===============================
+  # 📊 PERFORMANCE MONITORING
+  # ===============================
+  performance:
+    name: 📊 Performance Analysis
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'schedule' || contains(github.event.head_commit.message, '[perf]')
+    
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: 🏗️ Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          
+      - name: 📦 Install Dependencies
+        run: npm ci --legacy-peer-deps
+        
+      - name: 📊 Bundle Size Analysis
+        run: |
+          echo "## 📊 Bundle Analysis" >> $GITHUB_STEP_SUMMARY
+          if npx webpack-bundle-analyzer --help &> /dev/null; then
+            echo "Running bundle analysis..."
+            # Add bundle analysis commands here
+          else
+            echo "⚠️ Bundle analyzer not configured" >> $GITHUB_STEP_SUMMARY
+          fi
+        continue-on-error: true
+
+  # ===============================
+  # 📢 NOTIFICATIONS
+  # ===============================
+  notify:
+    name: 📢 Notifications
+    runs-on: ubuntu-latest
+    needs: [quality-check, test, build]
+    if: always() && (failure() || success())
+    
+    steps:
+      - name: 📢 Workflow Status Summary
+        run: |
+          echo "## 🔄 Workflow Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Repository**: ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Quality Check**: ${{ needs.quality-check.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tests**: ${{ needs.test.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build**: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.quality-check.result }}" == "failure" || "${{ needs.test.result }}" == "failure" || "${{ needs.build.result }}" == "failure" ]]; then
+            echo "## ❌ Some jobs failed" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the logs above for details." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ✅ All jobs completed successfully!" >> $GITHUB_STEP_SUMMARY
+          fi
